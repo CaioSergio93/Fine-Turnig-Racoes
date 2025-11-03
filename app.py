@@ -9,12 +9,9 @@ from transformers import (
     pipeline,
     DataCollatorWithPadding
 )
+# Usaremos o módulo Dataset nativo do Hugging Face/datasets
+from datasets import Dataset, load_metric
 from sklearn.model_selection import train_test_split
-# A biblioteca 'datasets' deve ser importada para usar o objeto Dataset
-from datasets import Dataset # NOVA IMPORTAÇÃO
-# Importa as funções de utilidade
-# Nota: pressupomos que 'utils.py' existe no mesmo diretório
-# from utils import create_label_maps, tokenize_function, convert_to_datasets
 
 # Configuração da página
 st.set_page_config(page_title="Fine-Tuning Rações (Cães/Gatos) com Hugging Face", layout="centered")
@@ -28,7 +25,7 @@ MODEL_NAME = "neuralmind/bert-base-portuguese-cased"
 JSONL_FILE = "racoes_caes_gatos.jsonl"
 
 
-# --- Funções Auxiliares (movidas aqui para correção) ---
+# --- Funções Auxiliares ---
 
 def create_label_maps(df, class_column='classe'):
     """Cria os mapas de ID para Label e vice-versa."""
@@ -41,22 +38,10 @@ def create_label_maps(df, class_column='classe'):
 def tokenize_function(tokenizer):
     """Retorna a função de tokenização."""
     def tokenize(examples):
+        # O campo 'texto' é o que contém a instrução a ser classificada
         return tokenizer(examples['texto'], truncation=True)
     return tokenize
 
-def convert_to_datasets(train_texts, val_texts, train_labels, val_labels):
-    """
-    Converte as listas de texto/label em objetos Dataset do Hugging Face.
-    CORREÇÃO APLICADA AQUI: forçar a criação do Dataset a partir de um dict.
-    """
-    train_dict = {'texto': train_texts.tolist(), 'label': train_labels.tolist()}
-    val_dict = {'texto': val_texts.tolist(), 'label': val_labels.tolist()}
-    
-    # Criamos o Dataset diretamente a partir dos dicionários
-    train_dataset = Dataset.from_dict(train_dict)
-    val_dataset = Dataset.from_dict(val_dict)
-    
-    return train_dataset, val_dataset
 
 # --- 1. Carregamento e Preparação dos Dados (Usando Cache de Dados) ---
 
@@ -64,7 +49,6 @@ def convert_to_datasets(train_texts, val_texts, train_labels, val_labels):
 def load_and_prepare_data(filepath):
     """
     Carrega dados do arquivo JSONL, cria a classe simplificada e retorna o DataFrame.
-    (O resto da função é o mesmo)
     """
     data = []
     try:
@@ -101,7 +85,7 @@ def load_and_prepare_data(filepath):
 
         df_loaded = pd.DataFrame(data)
         
-        # Filtragem de classes com poucas amostras
+        # Filtragem de classes com poucas amostras (mantido para robustez)
         class_counts = df_loaded['classe'].value_counts()
         valid_classes = class_counts[class_counts >= 3].index 
         
@@ -166,19 +150,20 @@ tokenizer = load_tokenizer()
 initial_model = load_initial_model(len(labels), id2label, label2id)
 
 
-# --- 2. Preparação para Fine-Tuning ---
+# --- 2. Preparação para Fine-Tuning (Nova Lógica de Split) ---
 
-# Separação de dados
+# CRUCIAL: Converter o Pandas DataFrame completo para um Hugging Face Dataset
 try:
-    train_texts, val_texts, train_labels, val_labels = train_test_split(
-        df['texto'], df['label'], test_size=0.2, random_state=42, stratify=df['label'])
-except ValueError:
-    st.warning("Aviso: Falha no `stratify` (poucas amostras por classe). Tentando divisão simples.")
-    train_texts, val_texts, train_labels, val_labels = train_test_split(
-        df['texto'], df['label'], test_size=0.2, random_state=42)
+    hf_dataset = Dataset.from_pandas(df, preserve_index=False) # preserve_index=False é a chave
+except Exception as e:
+    st.error(f"❌ Erro crítico ao converter DataFrame para Dataset: {e}")
+    st.stop()
+    
+# Separar em treino e validação usando o método nativo do Dataset
+raw_datasets = hf_dataset.train_test_split(test_size=0.2, seed=42)
 
-# Conversão para Dataset
-train_dataset, val_dataset = convert_to_datasets(train_texts, val_texts, train_labels, val_labels)
+train_dataset = raw_datasets['train']
+val_dataset = raw_datasets['test']
 
 # Tokenização
 tokenize = tokenize_function(tokenizer)
@@ -209,7 +194,7 @@ if st.button("🚀 Iniciar Fine-Tuning"):
             logging_strategy="epoch", 
             per_device_train_batch_size=4,
             per_device_eval_batch_size=4,
-            num_train_epochs=5, # Aumentado para 5 para melhor aprendizado com o dataset completo
+            num_train_epochs=5, 
             weight_decay=0.01,
             logging_steps=10,
             save_total_limit=1,
@@ -265,8 +250,8 @@ if st.button("Classificar", key="classificar_btn"):
                 confianca = resultado['score']
 
                 # Encontra a primeira resposta original do dataset para a classe prevista
-                resposta_original = df[df['classe'] == classe_prevista]['resposta_original'].iloc[0]
-            
+                resposta_original = df[df['classe'] == classe_prevista]
+
                 # Exibe o conteúdo do dataset
                 st.subheader("📝 Resposta do Dataset (Baseado na Classe)")
                 st.info(resposta_original)
@@ -277,4 +262,4 @@ if st.button("Classificar", key="classificar_btn"):
             st.error(f"Erro ao realizar a classificação. Detalhes: {e}")
 
 st.markdown("---")
-st.caption("O carregamento do modelo agora utiliza cache, o que deve resolver problemas de timeout na hospedagem.")
+st.caption("A nova lógica de data split corrige problemas de índice ao usar o método nativo do Hugging Face.")
