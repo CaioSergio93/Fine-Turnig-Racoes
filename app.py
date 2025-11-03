@@ -20,6 +20,13 @@ st.title("🐾 Classificador de Perguntas sobre Rações")
 st.write("Esta aplicação realiza o fine-tuning de um modelo BERT para classificar perguntas sobre rações para cães e gatos.")
 st.markdown("---")
 
+# ADIÇÃO CRÍTICA PARA DEBUG: Botão para limpar o cache e evitar erros de versão antiga
+if st.sidebar.button("Limpar Cache (Modelos, Tokenizer e Dados)"):
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    st.experimental_rerun()
+
+
 # Definições do Modelo
 MODEL_NAME = "neuralmind/bert-base-portuguese-cased"
 JSONL_FILE = "racoes_caes_gatos.jsonl"
@@ -150,22 +157,24 @@ tokenizer = load_tokenizer()
 initial_model = load_initial_model(len(labels), id2label, label2id)
 
 
-# --- 2. Preparação para Fine-Tuning (Nova Lógica de Split) ---
+# --- 2. Preparação para Fine-Tuning (Lógica Limpa) ---
 
 # CRUCIAL: Converter o Pandas DataFrame completo para um Hugging Face Dataset
 try:
-    hf_dataset = Dataset.from_pandas(df, preserve_index=False) # preserve_index=False é a chave
+    # 1. Usar o DataFrame completo para criar o Dataset
+    hf_dataset = Dataset.from_pandas(df, preserve_index=False) 
 except Exception as e:
     st.error(f"❌ Erro crítico ao converter DataFrame para Dataset: {e}")
     st.stop()
     
-# Separar em treino e validação usando o método nativo do Dataset
+# 2. Separar em treino e validação usando o método nativo do Dataset
+# Esta é a abordagem correta para evitar erros de índice
 raw_datasets = hf_dataset.train_test_split(test_size=0.2, seed=42)
 
 train_dataset = raw_datasets['train']
 val_dataset = raw_datasets['test']
 
-# Tokenização
+# 3. Tokenização
 tokenize = tokenize_function(tokenizer)
 
 train_dataset = train_dataset.map(tokenize, batched=True)
@@ -250,7 +259,11 @@ if st.button("Classificar", key="classificar_btn"):
                 confianca = resultado['score']
 
                 # Encontra a primeira resposta original do dataset para a classe prevista
-                resposta_original = df[df['classe'] == classe_prevista]
+                resposta_original = df[df['classe'] == classe_prevista]['resposta_original'].iloc[0]
+                
+                # Exibe a classe e a confiança
+                st.markdown(f"**Classe prevista:** `<span style='background-color:#d1e7dd; padding: 5px; border-radius: 5px; font-weight: bold;'>{classe_prevista}</span>`", unsafe_allow_html=True)
+                st.write(f"**Confiança na Classe:** `{confianca:.4f}`")
 
                 # Exibe o conteúdo do dataset
                 st.subheader("📝 Resposta do Dataset (Baseado na Classe)")
