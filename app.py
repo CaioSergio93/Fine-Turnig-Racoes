@@ -10,9 +10,11 @@ from transformers import (
     DataCollatorWithPadding
 )
 from sklearn.model_selection import train_test_split
+# A biblioteca 'datasets' deve ser importada para usar o objeto Dataset
+from datasets import Dataset # NOVA IMPORTAÇÃO
 # Importa as funções de utilidade
 # Nota: pressupomos que 'utils.py' existe no mesmo diretório
-from utils import create_label_maps, tokenize_function, convert_to_datasets
+# from utils import create_label_maps, tokenize_function, convert_to_datasets
 
 # Configuração da página
 st.set_page_config(page_title="Fine-Tuning Rações (Cães/Gatos) com Hugging Face", layout="centered")
@@ -25,12 +27,44 @@ st.markdown("---")
 MODEL_NAME = "neuralmind/bert-base-portuguese-cased"
 JSONL_FILE = "racoes_caes_gatos.jsonl"
 
+
+# --- Funções Auxiliares (movidas aqui para correção) ---
+
+def create_label_maps(df, class_column='classe'):
+    """Cria os mapas de ID para Label e vice-versa."""
+    labels = sorted(df[class_column].unique())
+    label2id = {label: i for i, label in enumerate(labels)}
+    id2label = {i: label for label, i in label2id.items()}
+    df['label'] = df[class_column].apply(lambda x: label2id[x])
+    return df, label2id, id2label, labels
+
+def tokenize_function(tokenizer):
+    """Retorna a função de tokenização."""
+    def tokenize(examples):
+        return tokenizer(examples['texto'], truncation=True)
+    return tokenize
+
+def convert_to_datasets(train_texts, val_texts, train_labels, val_labels):
+    """
+    Converte as listas de texto/label em objetos Dataset do Hugging Face.
+    CORREÇÃO APLICADA AQUI: forçar a criação do Dataset a partir de um dict.
+    """
+    train_dict = {'texto': train_texts.tolist(), 'label': train_labels.tolist()}
+    val_dict = {'texto': val_texts.tolist(), 'label': val_labels.tolist()}
+    
+    # Criamos o Dataset diretamente a partir dos dicionários
+    train_dataset = Dataset.from_dict(train_dict)
+    val_dataset = Dataset.from_dict(val_dict)
+    
+    return train_dataset, val_dataset
+
 # --- 1. Carregamento e Preparação dos Dados (Usando Cache de Dados) ---
 
 @st.cache_data
 def load_and_prepare_data(filepath):
     """
     Carrega dados do arquivo JSONL, cria a classe simplificada e retorna o DataFrame.
+    (O resto da função é o mesmo)
     """
     data = []
     try:
@@ -175,7 +209,7 @@ if st.button("🚀 Iniciar Fine-Tuning"):
             logging_strategy="epoch", 
             per_device_train_batch_size=4,
             per_device_eval_batch_size=4,
-            num_train_epochs=5,
+            num_train_epochs=5, # Aumentado para 5 para melhor aprendizado com o dataset completo
             weight_decay=0.01,
             logging_steps=10,
             save_total_limit=1,
@@ -232,11 +266,7 @@ if st.button("Classificar", key="classificar_btn"):
 
                 # Encontra a primeira resposta original do dataset para a classe prevista
                 resposta_original = df[df['classe'] == classe_prevista]['resposta_original'].iloc[0]
-                
-                # Exibe a classe e a confiança
-                st.markdown(f"**Classe prevista:** `<span style='background-color:#d1e7dd; padding: 5px; border-radius: 5px; font-weight: bold;'>{classe_prevista}</span>`", unsafe_allow_html=True)
-                st.write(f"**Confiança na Classe:** `{confianca:.4f}`")
-
+            
                 # Exibe o conteúdo do dataset
                 st.subheader("📝 Resposta do Dataset (Baseado na Classe)")
                 st.info(resposta_original)
