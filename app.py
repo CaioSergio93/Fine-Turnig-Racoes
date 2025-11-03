@@ -10,7 +10,7 @@ from transformers import (
     DataCollatorWithPadding
 )
 # Usaremos o módulo Dataset nativo do Hugging Face/datasets
-from datasets import Dataset, load_metric
+from datasets import Dataset
 from sklearn.model_selection import train_test_split
 
 # Configuração da página
@@ -276,3 +276,4 @@ if st.button("Classificar", key="classificar_btn"):
 
 st.markdown("---")
 st.caption("A nova lógica de data split corrige problemas de índice ao usar o método nativo do Hugging Face.")
+
