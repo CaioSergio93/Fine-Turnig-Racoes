@@ -11,6 +11,7 @@ from transformers import (
 )
 from sklearn.model_selection import train_test_split
 # Importa as funções de utilidade
+# Nota: pressupomos que 'utils.py' existe no mesmo diretório
 from utils import create_label_maps, tokenize_function, convert_to_datasets
 
 # Configuração da página
@@ -24,13 +25,12 @@ st.markdown("---")
 MODEL_NAME = "neuralmind/bert-base-portuguese-cased"
 JSONL_FILE = "racoes_caes_gatos.jsonl"
 
-# --- 1. Carregamento e Preparação dos Dados ---
+# --- 1. Carregamento e Preparação dos Dados (Usando Cache de Dados) ---
 
 @st.cache_data
 def load_and_prepare_data(filepath):
     """
-    Carrega dados do arquivo JSONL e cria uma classe simplificada (rótulo) 
-    baseada em palavras-chave presentes na instrução.
+    Carrega dados do arquivo JSONL, cria a classe simplificada e retorna o DataFrame.
     """
     data = []
     try:
@@ -54,14 +54,11 @@ def load_and_prepare_data(filepath):
                 elif 'adultos' in instruction or 'adulto' in instruction:
                     idade = 'adulto'
                 
-                # A classe deve ser a combinação 'animal-idade'
                 classe = f"{animal}-{idade}"
                 
-                # Filtra amostras que não pudemos rotular claramente (ex: 'outros-geral')
                 if classe == "outros-geral":
                      continue
                 
-                # Adiciona o texto original da resposta para consulta posterior
                 data.append({
                     'texto': item['instruction'], 
                     'classe': classe, 
@@ -70,13 +67,10 @@ def load_and_prepare_data(filepath):
 
         df_loaded = pd.DataFrame(data)
         
-        # Filtra classes com poucas amostras para evitar erro no train_test_split (stratify)
+        # Filtragem de classes com poucas amostras
         class_counts = df_loaded['classe'].value_counts()
-        # Aumentamos o requisito para 3 amostras por classe, se possível
         valid_classes = class_counts[class_counts >= 3].index 
         
-        # Se o número de classes válidas for muito pequeno, diminuímos o requisito,
-        # mas sempre garantimos que a classe de teste tenha pelo menos 1 amostra.
         if len(valid_classes) < 2:
             valid_classes = class_counts[class_counts >= 2].index
             
@@ -85,7 +79,6 @@ def load_and_prepare_data(filepath):
         return df_filtered
 
     except FileNotFoundError:
-        st.error(f"Arquivo de dados não encontrado: {filepath}. O treinamento não será possível.")
         return pd.DataFrame() 
     except Exception as e:
         st.error(f"Erro ao carregar ou processar o JSONL: {e}")
@@ -103,52 +96,62 @@ else:
 
 st.subheader("Visualização dos Dados de Treino (Amostra)")
 st.dataframe(df.head())
-st.write(f"Contagem de Classes: {df['classe'].value_counts().to_dict()}") # Novo log para ver as classes
+st.write(f"Contagem de Classes: {df['classe'].value_counts().to_dict()}")
 
-# Mapeamento de classes usando a função utilitária
+# Mapeamento de classes
 df, label2id, id2label, labels = create_label_maps(df, class_column='classe')
+
+
+# --- Funções com Cache para Componentes Pesados ---
+
+@st.cache_resource
+def load_tokenizer():
+    """Carrega o Tokenizer, que é um recurso pesado."""
+    try:
+        return AutoTokenizer.from_pretrained(MODEL_NAME)
+    except Exception as e:
+        st.error(f"Erro ao carregar o tokenizer: {e}")
+        st.stop()
+
+@st.cache_resource
+def load_initial_model(num_labels, id2label, label2id):
+    """Instancia o modelo BERT base, o que é muito lento sem cache."""
+    try:
+        return AutoModelForSequenceClassification.from_pretrained(
+            MODEL_NAME,
+            num_labels=num_labels,
+            id2label=id2label,
+            label2id=label2id
+        )
+    except Exception as e:
+        st.error(f"Erro ao instanciar o modelo base: {e}")
+        st.stop()
+
+# Carregamento cacheado
+tokenizer = load_tokenizer()
+initial_model = load_initial_model(len(labels), id2label, label2id)
+
 
 # --- 2. Preparação para Fine-Tuning ---
 
-# Separação de dados com stratify, pois agora temos mais dados
+# Separação de dados
 try:
     train_texts, val_texts, train_labels, val_labels = train_test_split(
         df['texto'], df['label'], test_size=0.2, random_state=42, stratify=df['label'])
-except ValueError as e:
-    # Se houver erro de stratify, fazemos sem ele, mas avisamos
-    st.warning(f"Aviso: Erro ao aplicar `stratify` na divisão dos dados ({e}). Tentando divisão simples.")
+except ValueError:
+    st.warning("Aviso: Falha no `stratify` (poucas amostras por classe). Tentando divisão simples.")
     train_texts, val_texts, train_labels, val_labels = train_test_split(
         df['texto'], df['label'], test_size=0.2, random_state=42)
 
-# Conversão para Dataset usando a função utilitária
+# Conversão para Dataset
 train_dataset, val_dataset = convert_to_datasets(train_texts, val_texts, train_labels, val_labels)
 
-# Carregar Tokenizer
-try:
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-except Exception as e:
-    st.error(f"Erro ao carregar o tokenizer: {e}")
-    st.stop()
-
-# Tokenização usando a função utilitária
+# Tokenização
 tokenize = tokenize_function(tokenizer)
 
 train_dataset = train_dataset.map(tokenize, batched=True)
 val_dataset = val_dataset.map(tokenize, batched=True)
 
-# Instanciar Modelo
-if 'model_instance' not in st.session_state:
-    try:
-        model = AutoModelForSequenceClassification.from_pretrained(
-            MODEL_NAME,
-            num_labels=len(labels),
-            id2label=id2label,
-            label2id=label2id
-        )
-        st.session_state.model_instance = model
-    except Exception as e:
-        st.error(f"Erro ao instanciar o modelo base: {e}")
-        st.stop()
 
 # --- 3. Treinamento ---
 
@@ -157,14 +160,22 @@ st.write(f"Modelo base: `{MODEL_NAME}`")
 st.write(f"Classes identificadas: `{', '.join(labels)}`")
 st.write(f"Total de Amostras de Treino: `{len(train_dataset)}`")
 
+# Inicializa o modelo na session_state para que o Trainer possa acessá-lo e modificá-lo
+if 'model_instance' not in st.session_state:
+    st.session_state.model_instance = initial_model
+
 if st.button("🚀 Iniciar Fine-Tuning"):
     with st.spinner("Treinando modelo... (O treinamento agora usará um dataset maior e será mais demorado.)"):
+        
+        # O modelo é clonado ou referenciado do cache/session_state
+        training_model = st.session_state.model_instance
+
         training_args = TrainingArguments(
             output_dir="./results",
             logging_strategy="epoch", 
             per_device_train_batch_size=4,
             per_device_eval_batch_size=4,
-            num_train_epochs=5,  # AUMENTADO PARA 5 EPOCHS
+            num_train_epochs=5,
             weight_decay=0.01,
             logging_steps=10,
             save_total_limit=1,
@@ -173,7 +184,7 @@ if st.button("🚀 Iniciar Fine-Tuning"):
         )
 
         trainer = Trainer(
-            model=st.session_state.model_instance,
+            model=training_model,
             args=training_args,
             train_dataset=train_dataset,
             eval_dataset=val_dataset,
@@ -183,11 +194,10 @@ if st.button("🚀 Iniciar Fine-Tuning"):
 
         trainer.train()
 
-        # Salvar o estado do modelo treinado na sessão
+        # Salva o estado do modelo treinado na sessão
         st.session_state.modelo_treinado = True
         st.session_state.trained_tokenizer = tokenizer
-        st.session_state.trained_model_instance = st.session_state.model_instance
-
+        # O st.session_state.model_instance já foi modificado in-place pelo Trainer
 
     st.success("✅ Modelo treinado com sucesso! Você já pode realizar previsões abaixo.")
 
@@ -203,14 +213,17 @@ if st.button("Classificar", key="classificar_btn"):
         st.error("O modelo ainda não foi treinado. Por favor, clique em '🚀 Iniciar Fine-Tuning' primeiro.")
     else:
         try:
+            # Reusa o modelo da session_state
+            model_to_use = st.session_state.model_instance
+            
             pipe = pipeline(
                 "text-classification",
-                model=st.session_state.trained_model_instance,
-                tokenizer=st.session_state.trained_tokenizer,
+                model=model_to_use,
+                tokenizer=tokenizer, # Reusa o tokenizer cacheado
                 device=-1 
             )
 
-            st.session_state.trained_model_instance.eval()
+            model_to_use.eval()
 
             with st.spinner("Classificando..."):
                 resultado = pipe(exemplo)[0]
@@ -219,15 +232,19 @@ if st.button("Classificar", key="classificar_btn"):
 
                 # Encontra a primeira resposta original do dataset para a classe prevista
                 resposta_original = df[df['classe'] == classe_prevista]['resposta_original'].iloc[0]
+                
+                # Exibe a classe e a confiança
+                st.markdown(f"**Classe prevista:** `<span style='background-color:#d1e7dd; padding: 5px; border-radius: 5px; font-weight: bold;'>{classe_prevista}</span>`", unsafe_allow_html=True)
+                st.write(f"**Confiança na Classe:** `{confianca:.4f}`")
 
                 # Exibe o conteúdo do dataset
                 st.subheader("📝 Resposta do Dataset (Baseado na Classe)")
                 st.info(resposta_original)
 
         except IndexError:
-            st.error("Não foi possível encontrar uma resposta de exemplo para a classe prevista no dataset de treino.")
+            st.error("Não foi possível encontrar uma resposta de exemplo para a classe prevista no dataset de treino. Isso pode indicar uma classe mal representada.")
         except Exception as e:
             st.error(f"Erro ao realizar a classificação. Detalhes: {e}")
 
 st.markdown("---")
-st.caption("O dataset agora carrega do arquivo `racoes_caes_gatos.jsonl` se estiver presente, o que deve melhorar a precisão.")
+st.caption("O carregamento do modelo agora utiliza cache, o que deve resolver problemas de timeout na hospedagem.")
